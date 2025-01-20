@@ -8,7 +8,10 @@ import re
 
 def normalize_query(query: str) -> str:
     # Replace parameter values (strings in quotes, numbers) with placeholders
-    query = re.sub(r"'.*?'", "?", query.split("QUERY")[1].replace(":",""))  # Replace strings
+    if "QUERY" in query:
+        query = re.sub(r"'.*?'", "?", query.split("QUERY")[1].replace(":",""))  # Replace strings
+    else:
+        query = re.sub(r"'.*?'", "?", query.split("TRANSACTION")[1].replace(":",""))  # Replace strings
     query = re.sub(r"\b\d+(\.\d+)?\b", "?", query)  # Replace numbers
     query = re.sub(r"\s+", " ", query).strip()  # Normalize whitespace
     return query
@@ -22,6 +25,11 @@ def first_queries_by_case(log_lines):
         .withColumn("case_id", split(col("line"), " ").getItem(2))  \
         .withColumn("normalized_query", normalize_query_udf(col("line"))) \
         .withColumn("row_id", monotonically_increasing_id()) 
+
+    queries.union(log_lines.filter(col("line").contains("TRANSACTION")) \
+        .withColumn("case_id", split(col("line"), " ").getItem(2))  \
+        .withColumn("normalized_query", normalize_query_udf(col("line"))) \
+        .withColumn("row_id", monotonically_increasing_id())) 
 
     window_spec = Window.partitionBy("case_id").orderBy("row_id")
 
@@ -48,6 +56,23 @@ def count_unique_cases(log_lines):
     return cases, cases.count()
 
 
+def count_unique_queries(log_lines):
+    queries = log_lines.filter(col("line").contains("QUERY")) \
+        .withColumn("normalized_query", normalize_query_udf(col("line")))
+    
+    # queries.union(log_lines.filter(col("line").contains("TRANSACTION")) \
+    #     .withColumn("normalized_query", normalize_query_udf(col("line"))))
+    
+    # Group by normalized query and count occurrences
+    query_groups = queries.groupBy("normalized_query").count()
+
+    # Sort results by count in descending order
+    sorted_query_groups = query_groups.orderBy(col("count").desc())
+
+    # Save results to a file
+    output_file = "output/normalized_queries"
+    sorted_query_groups.write.csv(output_file, header=True, mode="overwrite")
+
     
 if __name__ == "__main__":
     spark = SparkSession.builder \
@@ -61,11 +86,13 @@ if __name__ == "__main__":
         # .withColumn("line", split(col("line"), " ").getItem(2))
         # .show()
 
+    # Trying to count unique queries
+    count_unique_queries(log_lines)
 
     # Trying to check if there is a specific "first query" for each new case
     # first_queries_by_case(log_lines)
 
-    cases, unique_cases = count_unique_cases(log_lines)
+    # cases, unique_cases = count_unique_cases(log_lines)
 
     # Stop the Spark session
     spark.stop()
