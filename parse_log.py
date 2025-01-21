@@ -73,10 +73,17 @@ def count_unique_queries(log_lines):
     output_file = "output/normalized_queries"
     sorted_query_groups.write.csv(output_file, header=True, mode="overwrite")
 
-def extract_consecutive_pairs(log_lines,threshold=300):
+    return sorted_query_groups
+
+def extract_consecutive_pairs(log_lines,valid_queries, threshold=300):
+    spark = SparkSession.builder.getOrCreate()
+    bValid = spark.sparkContext.broadcast(set(valid_queries))
     # Extract queries with row id in order to create the pairs latter
+
+
     queries = log_lines.filter(col("line").contains("QUERY")) \
         .withColumn("normalized_query", normalize_query_udf(col("line"))) \
+        .filter(col("normalized_query").isin(bValid.value)) \
         .rdd.zipWithIndex().map(lambda x: (x[0][0], x[0][1], x[1])) \
         .toDF(["line", "normalized_query", "row_id"])
 
@@ -98,20 +105,34 @@ def extract_consecutive_pairs(log_lines,threshold=300):
 if __name__ == "__main__":
     spark = SparkSession.builder \
         .appName("KTEO log experiments") \
+        .master("local[6]") \
+        .config("spark.driver.memory", "2g") \
         .getOrCreate()
 
     log_file = sys.argv[1] if len(sys.argv) > 1 else "input/audit/20241210.log"
-    log_lines = spark.read.text(log_file).toDF("line") \
-        .filter((length(col("line")) > 0) & (col("line").startswith("["))) \
-        .withColumn("line", col("line").cast("string")) \
+
+    data=[]
+    with open(log_file, 'r', encoding='windows-1253', errors='replace') as f:
+        for line in f:
+            if line and "Ελεγκτης" in line and line[0]=="[":
+                data.append(line)
+
+    log_lines=spark.createDataFrame([(s,) for s in data],["line"])
+
+    # log_lines = spark.read.format("text").option("encoding", "Cp1253").load(log_file).toDF("line") \
+    #     .filter((length(col("line")) > 0) & (col("line").startswith("["))) \
+    #     .withColumn("line", col("line").cast("string")) \
         # .withColumn("line", split(col("line"), " ").getItem(2))
         # .show()
 
     # Trying to count unique queries
-    count_unique_queries(log_lines)
+    valid_queries = count_unique_queries(log_lines)\
+        .filter(col("count")<200)\
+        .select("normalized_query")\
+        .rdd.flatMap(lambda x: x).collect()
 
     # Extract consecutive pairs
-    extract_consecutive_pairs(log_lines)
+    extract_consecutive_pairs(log_lines, valid_queries,50)
     
 
 
