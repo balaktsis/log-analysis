@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, length, startswith
+from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, length, startswith, row_number, lead
 from pyspark.sql.window import Window
 from pyspark.sql.types import StringType
 import sys
@@ -73,6 +73,27 @@ def count_unique_queries(log_lines):
     output_file = "output/normalized_queries"
     sorted_query_groups.write.csv(output_file, header=True, mode="overwrite")
 
+def extract_consecutive_pairs(log_lines,threshold=300):
+    # Extract queries with row id in order to create the pairs latter
+    queries = log_lines.filter(col("line").contains("QUERY")) \
+        .withColumn("normalized_query", normalize_query_udf(col("line"))) \
+        .rdd.zipWithIndex().map(lambda x: (x[0][0], x[0][1], x[1])) \
+        .toDF(["line", "normalized_query", "row_id"])
+
+    # Create consecutive pairs, group based on the pair and count them
+    # At the end maintains only the pairs that occure more than `threshold` times
+    w = Window.orderBy("row_id")
+    pairs = queries.withColumn("next_query", lead("normalized_query").over(w))\
+        .filter(col("next_query").isNotNull())\
+        .select("normalized_query", "next_query")\
+        .groupBy("normalized_query", "next_query").count()\
+        .filter(col("count") > threshold)\
+        .orderBy(col("count").desc())
+    
+    # Write frequent pairs to a file
+    output_file = "output/frequent_query_pairs"
+    pairs.write.csv(output_file, header=True, mode="overwrite")
+
     
 if __name__ == "__main__":
     spark = SparkSession.builder \
@@ -88,6 +109,11 @@ if __name__ == "__main__":
 
     # Trying to count unique queries
     count_unique_queries(log_lines)
+
+    # Extract consecutive pairs
+    extract_consecutive_pairs(log_lines)
+    
+
 
     # Trying to check if there is a specific "first query" for each new case
     # first_queries_by_case(log_lines)
