@@ -1,7 +1,8 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, length, startswith, row_number, lead
 from pyspark.sql.window import Window
-from pyspark.sql.types import StringType
+from pyspark.sql.types import StringType, StructField, StructType
+import json
 import sys
 import re
 
@@ -17,6 +18,8 @@ def normalize_query(query: str) -> str:
     return query
 
 normalize_query_udf = udf(normalize_query, StringType())
+
+
 
 # Find the first queries by case ID and count how many times each query appeared
 def first_queries_by_case(log_lines):
@@ -75,6 +78,8 @@ def count_unique_queries(log_lines):
 
     return sorted_query_groups
 
+
+
 def extract_consecutive_pairs(log_lines,valid_queries, threshold=300):
     spark = SparkSession.builder.getOrCreate()
     bValid = spark.sparkContext.broadcast(set(valid_queries))
@@ -101,12 +106,83 @@ def extract_consecutive_pairs(log_lines,valid_queries, threshold=300):
     output_file = "output/frequent_query_pairs"
     pairs.write.csv(output_file, header=True, mode="overwrite")
 
+
+
+
+def extract_table_names(log_lines):
+    transactions = log_lines.filter(
+        (col("line").contains("INSERT INTO")) | (col("line").contains("UPDATE"))
+    )
+    
+    table_regex = r"(INSERT INTO|UPDATE)\s+([a-zA-Z0-9_]+)"
+    extracted_tables = transactions.rdd.map(lambda row: re.search(table_regex, row.line)) \
+                                        .filter(lambda match: match is not None) \
+                                        .map(lambda match: match.group(2)) \
+                                        .distinct() \
+                                        .collect()
+    
+    print("Tables found in INSERT/UPDATE transactions:")
+    for table in extracted_tables:
+        print(table)
+
+    return extracted_tables
+
+
+
+def extract_arith_kykl_values(log_lines):
+    queries = log_lines.filter(col("line").contains("QUERY"))
+
+    arith_kykl_regex = r"ARITH_KYKL\s*=\s*'(\d+)'"
+
+    arith_kykl_values = (
+        queries.rdd
+        .flatMap(lambda row: re.findall(arith_kykl_regex, row.line))
+        .distinct()  
+        .collect()  
+    )
+
+    print("Unique ARITH_KYKL values: ", len(arith_kykl_values))
+    for value in arith_kykl_values:
+        print(value)
+
+    return arith_kykl_values
+
+
+
+def group_queries_by_arith_kykl(log_lines):
+    # Filter for lines containing SELECT queries
+    select_queries = log_lines.filter(col("line").contains("QUERY") & col("line").contains("SELECT"))
+
+    # Regex pattern to extract ARITH_KYKL and the entire query
+    arith_kykl_regex = r"ARITH_KYKL\s*=\s*'(\d+)'"
+
+    # Extract ARITH_KYKL values and corresponding queries
+    grouped_queries = (
+        select_queries.rdd
+        .flatMap(lambda row: [
+            (arith_kykl, row.line) for arith_kykl in re.findall(arith_kykl_regex, row.line)
+        ])
+        .groupByKey()
+        .mapValues(list)
+        .collectAsMap()
+    )
+
+    grouped_queries_normalized = {
+        arith_kykl: [normalize_query(query) for query in queries]
+        for arith_kykl, queries in grouped_queries.items()
+    }
+
+    with open("output/grouped_by_arkyk.json", "w+", encoding="utf-8") as f:
+        json.dump(grouped_queries_normalized, f, ensure_ascii=False, indent=4)
+
+    return grouped_queries
+
     
 if __name__ == "__main__":
     spark = SparkSession.builder \
         .appName("KTEO log experiments") \
-        .master("local[6]") \
-        .config("spark.driver.memory", "2g") \
+        .master("local[*]") \
+        .config("spark.driver.memory", "8g") \
         .getOrCreate()
 
     log_file = sys.argv[1] if len(sys.argv) > 1 else "input/audit/20241210.log"
@@ -114,31 +190,38 @@ if __name__ == "__main__":
     data=[]
     with open(log_file, 'r', encoding='windows-1253', errors='replace') as f:
         for line in f:
-            if line and "Ελεγκτης" in line and line[0]=="[":
+            # print(line)           # uncomment to see if encoding is correct
+            if  line[0]=="[":
                 data.append(line)
 
-    log_lines=spark.createDataFrame([(s,) for s in data],["line"])
+    schema = StructType([StructField("line", StringType(), True)])
 
-    # log_lines = spark.read.format("text").option("encoding", "Cp1253").load(log_file).toDF("line") \
-    #     .filter((length(col("line")) > 0) & (col("line").startswith("["))) \
-    #     .withColumn("line", col("line").cast("string")) \
-        # .withColumn("line", split(col("line"), " ").getItem(2))
-        # .show()
+    log_lines=spark.createDataFrame([(s,) for s in data], schema=schema)
 
-    # Trying to count unique queries
-    valid_queries = count_unique_queries(log_lines)\
-        .filter(col("count")<200)\
-        .select("normalized_query")\
-        .rdd.flatMap(lambda x: x).collect()
 
+    # Count unique queries
+    # valid_queries = count_unique_queries(log_lines)\
+    #     .filter(col("count")<200)\
+    #     .select("normalized_query")\
+    #     .rdd.flatMap(lambda x: x).collect()
+
+    # Extract table names from INSERT/UPDATE transactions
+    table_names = extract_table_names(log_lines)
+
+    # Extract arith_kykl instances
+    arith_kykl_values = extract_arith_kykl_values(log_lines)
+
+    # Group queries by ARITH_KYKL
+    grouped_queries = group_queries_by_arith_kykl(log_lines)
+   
     # Extract consecutive pairs
-    extract_consecutive_pairs(log_lines, valid_queries,50)
+    # extract_consecutive_pairs(log_lines, valid_queries,50)
     
-
-
-    # Trying to check if there is a specific "first query" for each new case
+    # Check if there is a specific "first query" for each new case
     # first_queries_by_case(log_lines)
 
+
+   
     # cases, unique_cases = count_unique_cases(log_lines)
 
     # Stop the Spark session
