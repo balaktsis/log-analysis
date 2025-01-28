@@ -191,31 +191,36 @@ if __name__ == "__main__":
     with open(log_file, 'r', encoding='windows-1253', errors='replace') as f:
         for line in f:
             # print(line)           # uncomment to see if encoding is correct
-            if  line[0]=="[":
+            if  "Ελεγκτης" in line and line[0]=="[":
                 data.append(line)
 
     schema = StructType([StructField("line", StringType(), True)])
 
     log_lines=spark.createDataFrame([(s,) for s in data], schema=schema)
 
-
-    # Count unique queries
-    # valid_queries = count_unique_queries(log_lines)\
-    #     .filter(col("count")<200)\
-    #     .select("normalized_query")\
-    #     .rdd.flatMap(lambda x: x).collect()
-
     # Extract table names from INSERT/UPDATE transactions
     table_names = extract_table_names(log_lines)
 
-    # Extract arith_kykl instances
-    arith_kykl_values = extract_arith_kykl_values(log_lines)
+    # Count unique queries
+    valid_queries = count_unique_queries(log_lines)\
+        .filter(col("count")<500)\
+        .select("normalized_query")\
+        .rdd.flatMap(lambda x: x).collect()
 
-    # Group queries by ARITH_KYKL
-    grouped_queries = group_queries_by_arith_kykl(log_lines)
+    for table in table_names:
+        filter(lambda x: table in x, valid_queries)
+    
+    # print("Unique queries: ", len(valid_queries))
+
+
+    # # Extract arith_kykl instances
+    # arith_kykl_values = extract_arith_kykl_values(log_lines)
+
+    # # Group queries by ARITH_KYKL
+    # grouped_queries = group_queries_by_arith_kykl(log_lines)
    
     # Extract consecutive pairs
-    # extract_consecutive_pairs(log_lines, valid_queries,50)
+    extract_consecutive_pairs(log_lines, valid_queries,50)
     
     # Check if there is a specific "first query" for each new case
     # first_queries_by_case(log_lines)
