@@ -10,11 +10,15 @@ import re
 def normalize_query(query: str) -> str:
     # Replace parameter values (strings in quotes, numbers) with placeholders
     if "QUERY" in query:
-        query = re.sub(r"'.*?'", "?", query.split("QUERY")[1].replace(":",""))  # Replace strings
+        query = re.sub(r"'.*?'", "?", query.split("QUERY")[1].replace(":",""))
+    elif "INSERT INTO" in query:
+        query = "INSERT INTO " + re.sub(r"'.*?'", "?", query.split("INSERT INTO")[1].replace(":",""))
     else:
-        query = re.sub(r"'.*?'", "?", query.split("TRANSACTION")[1].replace(":",""))  # Replace strings
+        query = "UPDATE " + re.sub(r"'.*?'", "?", query.split("UPDATE")[1].replace(":",""))  
     query = re.sub(r"\b\d+(\.\d+)?\b", "?", query)  # Replace numbers
     query = re.sub(r"\s+", " ", query).strip()  # Normalize whitespace
+
+
     return query
 
 normalize_query_udf = udf(normalize_query, StringType())
@@ -60,7 +64,7 @@ def count_unique_cases(log_lines):
 
 
 def count_unique_queries(log_lines):
-    queries = log_lines.filter(col("line").contains("QUERY")) \
+    queries = log_lines.filter(col("line").contains("QUERY") | col("line").contains("INSERT INTO") | col("line").contains("UPDATE")) \
         .withColumn("normalized_query", normalize_query_udf(col("line")))
     
     # queries.union(log_lines.filter(col("line").contains("TRANSACTION")) \
@@ -86,7 +90,7 @@ def extract_consecutive_pairs(log_lines,valid_queries, threshold=300):
     # Extract queries with row id in order to create the pairs latter
 
 
-    queries = log_lines.filter(col("line").contains("QUERY")) \
+    queries = log_lines.filter(col("line").contains("QUERY") | col("line").contains("INSERT INTO") | col("line").contains("UPDATE")) \
         .withColumn("normalized_query", normalize_query_udf(col("line"))) \
         .filter(col("normalized_query").isin(bValid.value)) \
         .rdd.zipWithIndex().map(lambda x: (x[0][0], x[0][1], x[1])) \
