@@ -30,15 +30,17 @@ normalize_query_udf = udf(normalize_query, StringType())
 # Find the first queries by case ID and count how many times each query appeared
 def first_queries_by_case(log_lines):
     # Filter only QUERY lines and extract Case ID and normalize queries
-    queries = log_lines.filter(col("line").contains("QUERY")) \
+    queries = log_lines\
+        .filter(~col("line").contains("INPUT"))\
+        .filter(col("line").contains(" INSERT INTO ") | col("line").contains(" UPDATE "))\
         .withColumn("case_id", split(col("line"), " ").getItem(2))  \
         .withColumn("normalized_query", normalize_query_udf(col("line"))) \
         .withColumn("row_id", monotonically_increasing_id()) 
 
-    queries.union(log_lines.filter(col("line").contains("TRANSACTION")) \
-        .withColumn("case_id", split(col("line"), " ").getItem(2))  \
-        .withColumn("normalized_query", normalize_query_udf(col("line"))) \
-        .withColumn("row_id", monotonically_increasing_id())) 
+    # queries.union(log_lines.filter(col("line").contains("TRANSACTION")) \
+    #     .withColumn("case_id", split(col("line"), " ").getItem(2))  \
+    #     .withColumn("normalized_query", normalize_query_udf(col("line"))) \
+    #     .withColumn("row_id", monotonically_increasing_id())) 
 
     window_spec = Window.partitionBy("case_id").orderBy("row_id")
 
@@ -260,9 +262,9 @@ if __name__ == "__main__":
     # extract_consecutive_pairs(log_lines, valid_queries,50)
 
     # Compute confidence
-    compute_confidence(log_lines, valid_queries, 50)
+    # compute_confidence(log_lines, valid_queries, 50)
     
-    # first_queries_by_case(log_lines)
+    first_queries_by_case(log_lines)
 
    
     # cases, unique_cases = count_unique_cases(log_lines)
