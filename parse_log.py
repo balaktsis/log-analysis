@@ -9,17 +9,19 @@ import re
 
 def normalize_query(query: str) -> str:
     # Replace parameter values (strings in quotes, numbers) with placeholders
-    if "QUERY" in query:
-        query = re.sub(r"'.*?'", "?", query.split("QUERY")[1].replace(":",""))
-    elif "INSERT INTO" in query:
-        query = "INSERT INTO " + re.sub(r"'.*?'", "?", query.split("INSERT INTO")[1].replace(":",""))
-    else:
-        query = "UPDATE " + re.sub(r"'.*?'", "?", query.split("UPDATE")[1].replace(":",""))  
-    query = re.sub(r"\b\d+(\.\d+)?\b", "?", query)  # Replace numbers
-    query = re.sub(r"\s+", " ", query).strip()  # Normalize whitespace
+    try:
+        if "QUERY " in query:
+            query = re.sub(r"'.*?'", "?", query.split("QUERY")[1].replace(":",""))
+        elif "INSERT INTO " in query:
+            query = "INSERT INTO " + re.sub(r"'.*?'", "?", query.split("INSERT INTO")[1].replace(":",""))
+        else:
+            query = "UPDATE " + re.sub(r"'.*?'", "?", query.split("UPDATE")[1].replace(":",""))  
+        query = re.sub(r"\b\d+(\.\d+)?\b", "?", query)  # Replace numbers
+        query = re.sub(r"\s+", " ", query).strip()  # Normalize whitespace
+        return query
+    except:
+        return ""
 
-
-    return query
 
 normalize_query_udf = udf(normalize_query, StringType())
 
@@ -64,11 +66,11 @@ def count_unique_cases(log_lines):
 
 
 def count_unique_queries(log_lines):
-    queries = log_lines.filter(col("line").contains("QUERY") | col("line").contains("INSERT INTO") | col("line").contains("UPDATE")) \
-        .withColumn("normalized_query", normalize_query_udf(col("line")))
-    
-    # queries.union(log_lines.filter(col("line").contains("TRANSACTION")) \
-    #     .withColumn("normalized_query", normalize_query_udf(col("line"))))
+    queries = log_lines\
+        .filter(~col("line").contains("INPUT"))\
+        .filter(col("line").contains(" QUERY ") | col("line").contains(" INSERT INTO ") | col("line").contains(" UPDATE ")) \
+        .withColumn("normalized_query", normalize_query_udf(col("line")))\
+        .filter(col("normalized_query") != "")
     
     # Group by normalized query and count occurrences
     query_groups = queries.groupBy("normalized_query").count()
@@ -110,6 +112,42 @@ def extract_consecutive_pairs(log_lines,valid_queries, threshold=300):
     output_file = "output/frequent_query_pairs"
     pairs.write.csv(output_file, header=True, mode="overwrite")
 
+
+
+def compute_confidence(log_lines, valid_queries, threshold=300):
+    spark = SparkSession.builder.getOrCreate()
+    bValid = spark.sparkContext.broadcast(set(valid_queries))
+    
+    # Extract queries with row id in order to create the pairs later
+    queries = log_lines\
+        .filter(~col("line").contains("INPUT"))\
+        .filter(col("line").contains("QUERY") | col("line").contains("INSERT INTO") | col("line").contains("UPDATE")) \
+        .withColumn("normalized_query", normalize_query_udf(col("line"))) \
+        .filter(col("normalized_query").isin(bValid.value)) \
+        .rdd.zipWithIndex().map(lambda x: (x[0][0], x[0][1], x[1])) \
+        .toDF(["line", "normalized_query", "row_id"])
+    
+    # Compute the total occurrence count of each query
+    query_counts = queries.groupBy("normalized_query").count().withColumnRenamed("count", "total_count")
+    
+    # Create consecutive pairs, group based on the pair, count them, and filter by threshold
+    w = Window.orderBy("row_id")
+    pairs = queries.withColumn("next_query", lead("normalized_query").over(w)) \
+        .filter(col("next_query").isNotNull()) \
+        .select("normalized_query", "next_query") \
+        .groupBy("normalized_query", "next_query").count() \
+        .filter(col("count") > threshold)
+    
+    # Calculate confidence by joining with total counts of the first query in the pair
+    confidence_df = pairs.join(query_counts, "normalized_query") \
+        .withColumn("confidence", col("count") / col("total_count")) \
+        .orderBy(col("confidence").desc())
+    
+    # Write the result to a file
+    output_file = "output/confidence_query_pairs"
+    confidence_df.write.csv(output_file, header=True, mode="overwrite")
+    
+    return confidence_df
 
 
 
@@ -205,7 +243,6 @@ if __name__ == "__main__":
     # Extract table names from INSERT/UPDATE transactions
     table_names = extract_table_names(log_lines)
 
-    # Count unique queries
     valid_queries = count_unique_queries(log_lines)\
         .filter(col("count")<500)\
         .select("normalized_query")\
@@ -216,23 +253,19 @@ if __name__ == "__main__":
     
     # print("Unique queries: ", len(valid_queries))
 
-
-    # # Extract arith_kykl instances
     # arith_kykl_values = extract_arith_kykl_values(log_lines)
 
-    # # Group queries by ARITH_KYKL
     # grouped_queries = group_queries_by_arith_kykl(log_lines)
    
-    # Extract consecutive pairs
-    extract_consecutive_pairs(log_lines, valid_queries,50)
-    
-    # Check if there is a specific "first query" for each new case
-    # first_queries_by_case(log_lines)
+    # extract_consecutive_pairs(log_lines, valid_queries,50)
 
+    # Compute confidence
+    compute_confidence(log_lines, valid_queries, 50)
+    
+    # first_queries_by_case(log_lines)
 
    
     # cases, unique_cases = count_unique_cases(log_lines)
 
-    # Stop the Spark session
     spark.stop()
 

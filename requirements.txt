@@ -1,3 +1,5 @@
 pyspark
 pandas
 nltk
+networkx
+matplotlib
