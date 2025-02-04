@@ -4,3 +4,6 @@
 
 *29/01/2025 Christos*
 - Done some confidence measurements on frequent consecutive pairs; found that some query pairs present 100% confidence.
+
+*04/02/2025 Christos*
+- There are 66 distinct ARITH_KYKL in the log, but they don't have the same count.

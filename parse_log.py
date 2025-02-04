@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, length, startswith, row_number, lead
+from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, length, size, startswith, row_number, lead, desc, regexp_extract, collect_list
 from pyspark.sql.window import Window
 from pyspark.sql.types import StringType, StructField, StructType
 import json
@@ -153,7 +153,7 @@ def compute_confidence(log_lines, valid_queries, threshold=300):
 
 
 
-def extract_table_names(log_lines):
+def extract_table_names(log_lines, printFlag=True):
     transactions = log_lines.filter(
         (col("line").contains("INSERT INTO")) | (col("line").contains("UPDATE"))
     )
@@ -165,61 +165,75 @@ def extract_table_names(log_lines):
                                         .distinct() \
                                         .collect()
     
-    print("Tables found in INSERT/UPDATE transactions:")
-    for table in extracted_tables:
-        print(table)
+    if printFlag:
+        print("Tables found in INSERT/UPDATE transactions:")
+        for table in extracted_tables:
+            print(table)
 
     return extracted_tables
 
 
 
 def extract_arith_kykl_values(log_lines):
-    queries = log_lines.filter(col("line").contains("QUERY"))
+    pattern = r"([Α-Ω]{3}\d{4})"
 
-    arith_kykl_regex = r"ARITH_KYKL\s*=\s*'(\d+)'"
+    # Extract ARITH_KYKL from log lines
+    log_lines_extracted = log_lines.filter(~col("line").contains("INPUT"))\
+        .filter(col("line").contains(" QUERY "))\
+        .withColumn("ARITH_KYKL", regexp_extract(col("line"), pattern, 1))\
+        .filter(col("ARITH_KYKL") != "")
 
-    arith_kykl_values = (
-        queries.rdd
-        .flatMap(lambda row: re.findall(arith_kykl_regex, row.line))
-        .distinct()  
-        .collect()  
-    )
+    # Count distinct values
+    distinct_counts = log_lines_extracted.groupBy("ARITH_KYKL").count().orderBy(desc("count"))
+    
+    print("Distinct ARITHMOI KYKLOFORIAS: ", distinct_counts.count())
 
-    print("Unique ARITH_KYKL values: ", len(arith_kykl_values))
-    for value in arith_kykl_values:
-        print(value)
-
-    return arith_kykl_values
-
+    distinct_counts.write.csv("output/arith_kykl_values", header=True, mode="overwrite")
 
 
 def group_queries_by_arith_kykl(log_lines):
-    # Filter for lines containing SELECT queries
-    select_queries = log_lines.filter(col("line").contains("QUERY") & col("line").contains("SELECT"))
+    pattern = r"([Α-Ω]{3}\d{4})"
 
-    # Regex pattern to extract ARITH_KYKL and the entire query
-    arith_kykl_regex = r"ARITH_KYKL\s*=\s*'(\d+)'"
+    # Extract ARITH_KYKL from log lines
+    log_lines_extracted = log_lines.filter(~col("line").contains("INPUT"))\
+        .filter(col("line").contains(" QUERY "))\
+        .withColumn("ARITH_KYKL", regexp_extract(col("line"), pattern, 1))\
+        .filter(col("ARITH_KYKL") != "")
 
-    # Extract ARITH_KYKL values and corresponding queries
-    grouped_queries = (
-        select_queries.rdd
-        .flatMap(lambda row: [
-            (arith_kykl, row.line) for arith_kykl in re.findall(arith_kykl_regex, row.line)
-        ])
-        .groupByKey()
-        .mapValues(list)
-        .collectAsMap()
-    )
+    grouped_logs = log_lines_extracted.groupBy("ARITH_KYKL")\
+        .agg(
+            collect_list("line").alias("grouped_lines"),
+            size(collect_list("line")).alias("query_count")
+        )
+    print("Grouped logs count: ", grouped_logs.count())
 
-    grouped_queries_normalized = {
-        arith_kykl: [normalize_query(query) for query in queries]
-        for arith_kykl, queries in grouped_queries.items()
-    }
+    json_output = grouped_logs.toJSON().collect()
 
-    with open("output/grouped_by_arkyk.json", "w+", encoding="utf-8") as f:
-        json.dump(grouped_queries_normalized, f, ensure_ascii=False, indent=4)
+    json_data = [json.loads(row) for row in json_output]
 
-    return grouped_queries
+    json_file_path = "./output/grouped_logs_by_arith_kykl.json"
+    with open(json_file_path, "w", encoding="utf-8") as f:
+        json.dump(json_data, f, indent=4, ensure_ascii=False)
+
+
+def group_queries_by_id(log_lines):
+    id_pattern = r"WHERE. *?\bARXEISOD\.ID\s*=\s*(\d+)"
+
+    log_lines_with_id = log_lines.filter(~col("line").contains("INPUT"))\
+        .withColumn("ARXEISOD_ID", regexp_extract(col("line"), id_pattern, 1))\
+        .filter(col("ARXEISOD_ID") != "")
+
+    grouped_logs = log_lines_with_id.groupBy("ARXEISOD_ID").agg(collect_list("line").alias("grouped_lines"))
+
+    print("Grouped logs count: ", grouped_logs.count())
+
+    json_output = grouped_logs.toJSON().collect()
+
+    json_data = [json.loads(row) for row in json_output]
+
+    with open("./output/grouped_queries_by_id.json", "w", encoding="utf-8") as f:
+        json.dump(json_data, f, indent=4, ensure_ascii=False)
+
 
     
 if __name__ == "__main__":
@@ -229,13 +243,13 @@ if __name__ == "__main__":
         .config("spark.driver.memory", "8g") \
         .getOrCreate()
 
-    log_file = sys.argv[1] if len(sys.argv) > 1 else "input/audit/20241210.log"
+    log_file = sys.argv[1] if len(sys.argv) > 1 else "input/audit/20241212.log"
 
     data=[]
     with open(log_file, 'r', encoding='windows-1253', errors='replace') as f:
         for line in f:
             # print(line)           # uncomment to see if encoding is correct
-            if  "Ελεγκτης" in line and line[0]=="[":
+            if "Ελεγκτης" in line and line[0]=="[":
                 data.append(line)
 
     schema = StructType([StructField("line", StringType(), True)])
@@ -243,15 +257,26 @@ if __name__ == "__main__":
     log_lines=spark.createDataFrame([(s,) for s in data], schema=schema)
 
     # Extract table names from INSERT/UPDATE transactions
-    table_names = extract_table_names(log_lines)
-
-    valid_queries = count_unique_queries(log_lines)\
-        .filter(col("count")<500)\
-        .select("normalized_query")\
-        .rdd.flatMap(lambda x: x).collect()
+    table_names = extract_table_names(log_lines, False)
 
     for table in table_names:
-        filter(lambda x: table in x, valid_queries)
+        filter(lambda x: table in x, log_lines)
+
+    extract_arith_kykl_values(log_lines)
+    group_queries_by_arith_kykl(log_lines)
+    group_queries_by_id(log_lines)
+
+
+
+
+
+    # valid_queries = count_unique_queries(log_lines)\
+    #     .filter(col("count")<500)\
+    #     .select("normalized_query")\
+    #     .rdd.flatMap(lambda x: x).collect()
+
+    # for table in table_names:
+    #     filter(lambda x: table in x, valid_queries)
     
     # print("Unique queries: ", len(valid_queries))
 
@@ -264,7 +289,7 @@ if __name__ == "__main__":
     # Compute confidence
     # compute_confidence(log_lines, valid_queries, 50)
     
-    first_queries_by_case(log_lines)
+    # first_queries_by_case(log_lines)
 
    
     # cases, unique_cases = count_unique_cases(log_lines)
