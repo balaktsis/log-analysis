@@ -7,12 +7,24 @@ from pyvis.network import Network
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import numpy as np
+import textwrap
+import matplotlib.colors as mcolors
 
 
 
-DATASET_CSV = "output/" + "ins-upd_consec_pairs.csv"
+DATASET_CSV = "output/" + "mixed_consec_pairs.csv"
 CONF = 0.1
 
+
+
+def get_color_for_confidence(confidence):
+    """
+    Maps confidence values to a color gradient from red (low confidence) to green (high confidence).
+    """
+    cmap = mcolors.LinearSegmentedColormap.from_list("conf_cmap", ["red", "blue", "green"])
+    norm = mcolors.Normalize(vmin=0, vmax=1) 
+    rgba = cmap(norm(confidence))
+    return mcolors.to_hex(rgba)
 
 
 def build_query_chains(confidence_df, min_chain_confidence=0.01, max_chain_length=5):
@@ -59,45 +71,48 @@ def build_query_chains(confidence_df, min_chain_confidence=0.01, max_chain_lengt
         visited = set([start_query])  
         dfs([start_query], 1.0, visited)
 
-    return sorted(chains, key=lambda x: -x[1]), confidence_map
+    return query_to_id, sorted(chains, key=lambda x: -x[1]), confidence_map
 
-def plot_query_chains(chains, confidence_map):
+def plot_query_chains(chains, confidence_map, query_map: dict):
+        
     G = nx.DiGraph()
+    G.name = "Query Chains"
 
     for chain, conf in chains:
         for i in range(len(chain) - 1):
             if (chain[i], chain[i + 1]) in confidence_map:
                 G.add_edge(chain[i], chain[i + 1], confidence=confidence_map[(chain[i], chain[i + 1])])
 
-    # Create a PyVis network
     net = Network(notebook=True, height="800px", width="100%", directed=True)
     
-    # Add nodes to the PyVis network
     for node in G.nodes():
-        net.add_node(node, label=node, color="lightblue")
+        query_info = [key for key, val in query_map.items() if val == node][0]      
+        formatted_query_info = "\n".join(textwrap.wrap(query_info, width=60))  
+        net.add_node(
+            node, 
+            label=node, 
+            color="lightblue", 
+            title=formatted_query_info,
+        )
     
-    # Add edges with confidence labels
     for edge in G.edges(data=True):
         start, end, data = edge
         confidence = data['confidence']
+        edge_color = get_color_for_confidence(confidence)
         net.add_edge(
             start, 
             end, 
-            title=f"Confidence: {confidence:.2f}",  # Tooltip on hover
-            label=f"{confidence:.2f}",             # Label displayed on the edge
-            # value=confidence                       # Optional: influences edge thickness
+            label=f"{confidence:.2f}",           
+            color=edge_color                       
+
         )
 
-    # Enable physics for interactive node movement
     net.toggle_physics(True)
-        
-    # Show the network
+
     net.show("output/query_chains_graph_" + DATASET_CSV.split("/")[1].split(".")[0] + ".html")
 
-# Initialize Spark session
 spark = SparkSession.builder.getOrCreate()
 confidence_df = spark.read.csv(DATASET_CSV, header=True, inferSchema=True).withColumn("confidence", col("confidence").cast("double"))
 
-# Build query chains and plot the interactive graph
-chains, confidence_map = build_query_chains(confidence_df, min_chain_confidence=CONF, max_chain_length=1)
-plot_query_chains(chains, confidence_map)
+query_map, chains, confidence_map = build_query_chains(confidence_df, min_chain_confidence=CONF, max_chain_length=1)
+plot_query_chains(chains, confidence_map, query_map)

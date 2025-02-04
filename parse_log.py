@@ -198,7 +198,9 @@ def group_queries_by_arith_kykl(log_lines):
     log_lines_extracted = log_lines.filter(~col("line").contains("INPUT"))\
         .filter(col("line").contains(" QUERY "))\
         .withColumn("ARITH_KYKL", regexp_extract(col("line"), pattern, 1))\
-        .filter(col("ARITH_KYKL") != "")
+        .filter(col("ARITH_KYKL") != "")\
+        .distinct()
+        # .withColumn("line",split(normalize_query_udf(col("line")), " WHERE ")[0])\
 
     grouped_logs = log_lines_extracted.groupBy("ARITH_KYKL")\
         .agg(
@@ -243,7 +245,7 @@ if __name__ == "__main__":
         .config("spark.driver.memory", "8g") \
         .getOrCreate()
 
-    log_file = sys.argv[1] if len(sys.argv) > 1 else "input/audit/20241212.log"
+    log_file = sys.argv[1] if len(sys.argv) > 1 else "input/audit/20241210.log"
 
     data=[]
     with open(log_file, 'r', encoding='windows-1253', errors='replace') as f:
@@ -262,7 +264,7 @@ if __name__ == "__main__":
     for table in table_names:
         filter(lambda x: table in x, log_lines)
 
-    extract_arith_kykl_values(log_lines)
+    # extract_arith_kykl_values(log_lines)
     group_queries_by_arith_kykl(log_lines)
     group_queries_by_id(log_lines)
 
