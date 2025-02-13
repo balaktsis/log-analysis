@@ -1,7 +1,8 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, length, size, startswith, row_number, lead, desc, regexp_extract, collect_list
+from pyspark.sql.functions import col, udf, monotonically_increasing_id, lag, split, expr, size, struct, row_number, lead, desc, regexp_extract, collect_list
 from pyspark.sql.window import Window
-from pyspark.sql.types import StringType, StructField, StructType
+from pyspark.sql.types import StringType, StructField, StructType, TimestampType
+from datetime import datetime
 import json
 import sys
 import re
@@ -69,6 +70,7 @@ def count_unique_cases(log_lines):
 
 def count_unique_queries(log_lines):
     queries = log_lines\
+        .select("line")\
         .filter(~col("line").contains("INPUT"))\
         .filter(col("line").contains(" QUERY ") | col("line").contains(" INSERT INTO ") | col("line").contains(" UPDATE ")) \
         .withColumn("normalized_query", normalize_query_udf(col("line")))\
@@ -191,26 +193,39 @@ def extract_arith_kykl_values(log_lines):
     distinct_counts.write.csv("output/arith_kykl_values", header=True, mode="overwrite")
 
 
+
+
+def normalize_where(query):
+    # Split by WHERE and take the first part
+    query = re.split(r" WHERE ", query, maxsplit=1)[0]
+    return query
+
+normalize_where_udf = udf(normalize_where, StringType())
+
+
+
 def group_queries_by_arith_kykl(log_lines):
     pattern = r"([Α-Ω]{3}\d{4})"
 
-    # Extract ARITH_KYKL from log lines
     log_lines_extracted = log_lines.filter(~col("line").contains("INPUT"))\
         .filter(col("line").contains(" QUERY "))\
         .withColumn("ARITH_KYKL", regexp_extract(col("line"), pattern, 1))\
         .filter(col("ARITH_KYKL") != "")\
+        .withColumn("normalized_line", normalize_where_udf(col("line")))\
         .distinct()
-        # .withColumn("line",split(normalize_query_udf(col("line")), " WHERE ")[0])\
 
-    grouped_logs = log_lines_extracted.groupBy("ARITH_KYKL")\
+    sorted_logs = log_lines_extracted.orderBy("ARITH_KYKL", "timestamp")
+
+    grouped_logs = sorted_logs.groupBy("ARITH_KYKL")\
         .agg(
-            collect_list("line").alias("grouped_lines"),
-            size(collect_list("line")).alias("query_count")
+            size(collect_list("normalized_line")).alias("query_count"),
+            collect_list(struct("timestamp", "normalized_line")).alias("grouped_lines")
         )
+                   
+
     print("Grouped logs count: ", grouped_logs.count())
 
     json_output = grouped_logs.toJSON().collect()
-
     json_data = [json.loads(row) for row in json_output]
 
     json_file_path = "./output/grouped_logs_by_arith_kykl.json"
@@ -241,7 +256,7 @@ def group_queries_by_id(log_lines):
 if __name__ == "__main__":
     spark = SparkSession.builder \
         .appName("KTEO log experiments") \
-        .master("local[*]") \
+        .master("local[4]") \
         .config("spark.driver.memory", "8g") \
         .getOrCreate()
 
@@ -250,26 +265,39 @@ if __name__ == "__main__":
     data=[]
     with open(log_file, 'r', encoding='windows-1253', errors='replace') as f:
         for line in f:
+            if "[" != line[0]:
+                continue
             # print(line)           # uncomment to see if encoding is correct
-            if "Ελεγκτης" in line and line[0]=="[":
-                data.append(line)
+            timestamp_str = line.split("]")[0][1:]
+            try:
+                timestamp = datetime.strptime(timestamp_str, "%d/%m/%Y %H:%M:%S")
+            except ValueError:
+                timestamp = None    
+            data.append((timestamp, line.strip()))
 
-    schema = StructType([StructField("line", StringType(), True)])
+    # Define schema with both timestamp and line
+    schema = StructType([
+        StructField("timestamp", TimestampType(), True),
+        StructField("line", StringType(), True)
+    ])
 
-    log_lines=spark.createDataFrame([(s,) for s in data], schema=schema)
+
+    log_lines = spark.createDataFrame(data, schema)\
+        .filter(col("line").isNotNull())\
+        .filter(col("line") != "")\
+        .filter(col("timestamp").isNotNull())
+
 
     # Extract table names from INSERT/UPDATE transactions
     table_names = extract_table_names(log_lines, False)
 
+
     for table in table_names:
-        filter(lambda x: table in x, log_lines)
+        filter(lambda x: table in x["line"], log_lines)
 
     # extract_arith_kykl_values(log_lines)
-    group_queries_by_arith_kykl(log_lines)
-    group_queries_by_id(log_lines)
-
-
-
+    # group_queries_by_arith_kykl(log_lines)
+    # group_queries_by_id(log_lines)
 
 
     # valid_queries = count_unique_queries(log_lines)\
@@ -277,14 +305,12 @@ if __name__ == "__main__":
     #     .select("normalized_query")\
     #     .rdd.flatMap(lambda x: x).collect()
 
-    # for table in table_names:
-    #     filter(lambda x: table in x, valid_queries)
     
     # print("Unique queries: ", len(valid_queries))
 
     # arith_kykl_values = extract_arith_kykl_values(log_lines)
 
-    # grouped_queries = group_queries_by_arith_kykl(log_lines)
+    grouped_queries = group_queries_by_arith_kykl(log_lines)
    
     # extract_consecutive_pairs(log_lines, valid_queries,50)
 
